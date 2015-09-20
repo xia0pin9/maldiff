@@ -7,12 +7,12 @@ import (
     "log"
     "sync"
     "flag"
-    "bytes"
+    //"bytes"
     "strconv"
     "strings"
     "runtime"
-    "io/ioutil"
-    "encoding/gob"
+    //"io/ioutil"
+    //"encoding/gob"
     "encoding/json"
     "github.com/syndtr/goleveldb/leveldb"
     "github.com/syndtr/goleveldb/leveldb/util"
@@ -34,9 +34,10 @@ var (
     Trace, Info, Warning, Error             *log.Logger
     logfile, bendb, maldb, benmeta, malmeta, output  string
     threshold                               float64
-    bitmap = make(map[uint]uint)
-    benMetaMap = make(map[string]*MetaInfo)
-    malMetaMap = make(map[string]*MetaInfo)
+    //bitmap = make(map[uint]uint)
+    bitmap [256]uint
+    benMetaMap  map[string]*MetaInfo
+    malMetaMap  map[string]*MetaInfo
 )
 
 func Init(errorHandle io.Writer) {
@@ -64,36 +65,58 @@ func init() {
     flag.Float64Var(&threshold, "threshold", 0.85, "similarity threshold")
 }
 
-func load(fname string, e interface{}) {
-    n,err := ioutil.ReadFile(fname)
-    if err != nil { panic(err) }
+func load(dbname string) map[string]*MetaInfo {
+    db, _ := leveldb.OpenFile(dbname, nil)
+    defer db.Close()
 
-    p := bytes.NewBuffer(n)
-    dec := gob.NewDecoder(p)
+    var key, value []byte
+    metamap := make(map[string]*MetaInfo)
 
-    err = dec.Decode(e)
-    if err != nil { panic(err) }
+    iter := db.NewIterator(util.BytesPrefix([]byte("m-")), nil)
+    for iter.Next() {
+        key = iter.Key()
+        //bnumFunc, _ = strconv.ParseFloat(strings.Split(string(bkey[:]), "-")[2], 64) 
+        value = iter.Value()
+        var minfo MetaInfo
+        if err := json.Unmarshal(value, &minfo); err != nil {
+            Error.Println("Unmarshal error", string(key[:]), err)
+        }
+        metamap[strings.Split(string(key[:]), "-")[1]] = &minfo
+    }
+    defer iter.Release() 
+    return metamap
 }
+
+//func load(fname string, e interface{}) {
+//    n,err := ioutil.ReadFile(fname)
+//    if err != nil { panic(err) }
+//
+//    p := bytes.NewBuffer(n)
+//    dec := gob.NewDecoder(p)
+//
+//    err = dec.Decode(e)
+//    if err != nil { panic(err) }
+//}
 
 func bitcount(fhash []byte) uint {
     res := uint(0)
     for _, b := range fhash {
-        res += bitmap[uint(b)]
+        res += bitmap[b]
     }
     return res
 }
 
 func loadbmap() {
-    for i := uint(0); i <= 255; i++ {
+    for i := 0; i <= 255; i++ {
         bitmap[i] = nb(i)
     }
 }
 
-func nb(val uint) uint {
+func nb(val int) uint {
     res := uint(0)
     for ; val != 0; {
         res += 1
-        val &= val - 1
+        val &= (val - 1)
     }
     return res
 }
@@ -101,9 +124,11 @@ func nb(val uint) uint {
 func HashCompare(bhash, mhash []byte, bsize, msize float64) float64 {
     res := 0.0
     for i := 0; i < len(bhash); i ++ {
-        res += float64(bitmap[uint(bhash[i])&uint(mhash[i])])
+        bindex := bhash[i]&mhash[i]
+        res += float64(bitmap[bindex])
+        //res += float64(bitmap[uint(bhash[i]&mhash[i])])
     }
-    return res/(bsize + msize - res)
+    return res/bsize //(bsize + msize - res)
 }
 
 func SliceCompare(bset, mset []string) float64 {
@@ -220,7 +245,7 @@ func MetaCheck(benDB, malDB *leveldb.DB, bmd5, mmd5 string) bool {
     beniter := benDB.NewIterator(util.BytesPrefix([]byte("p-"+bmd5)), nil)
     for beniter.Next() {
         bkey = beniter.Key()
-        bnumFunc, _ = strconv.ParseFloat(strings.Split(string(bkey[:]), "-")[2], 64)
+        bnumFunc, _ = strconv.ParseFloat(strings.Split(string(bkey[:]), "-")[1], 64)
         bvalue = beniter.Value()
         if err := json.Unmarshal(bvalue, &btopPkgs); err != nil {
             Error.Println("Unmarshal error", bmd5, err)
@@ -231,7 +256,7 @@ func MetaCheck(benDB, malDB *leveldb.DB, bmd5, mmd5 string) bool {
     maliter := malDB.NewIterator(util.BytesPrefix([]byte("h-"+mmd5)), nil)
     for maliter.Next() {
         mkey = maliter.Key()
-        mnumFunc, _ = strconv.ParseFloat(strings.Split(string(mkey[:]), "-")[2], 64)
+        mnumFunc, _ = strconv.ParseFloat(strings.Split(string(mkey[:]), "-")[1], 64)
         mvalue = maliter.Value()
         if err := json.Unmarshal(mvalue, &mtopPkgs); err != nil {
             Error.Println("Unmarshal error", mmd5, err)
@@ -264,8 +289,10 @@ func Worker(benDB, malDB *leveldb.DB, keysChan chan *KeyPair, resChan chan strin
         if MetaCheck(benDB, malDB, keyPair.bmd5, keyPair.mmd5) {
             bhash, _ = benDB.Get(keyPair.bkey, nil)
             mhash, _ = malDB.Get(keyPair.mkey, nil)
-            score = HashCompare(bhash, mhash, keyPair.bsize, keyPair.msize)
-            resChan <- fmt.Sprintf("%v, %v, %.3f\n", keyPair.bmd5, keyPair.mmd5, score) 
+            if len(bhash) > 0 && len(mhash) > 0 {
+                score = HashCompare(bhash, mhash, keyPair.bsize, keyPair.msize)
+                resChan <- fmt.Sprintf("%v, %v, %.3f\n", keyPair.bmd5, keyPair.mmd5, score) 
+            }
         }
     }
 }
@@ -290,8 +317,10 @@ func main() {
     }
 
     loadbmap()
-    load(benmeta, &benMetaMap)
-    load(malmeta, &malMetaMap)
+    //load(malmeta, &malMetaMap)
+    //load(benmeta, &benMetaMap) 
+    malMetaMap = load(malmeta)
+    benMetaMap = load(benmeta)
 
     logFile, err := os.OpenFile("compare.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
     if err != nil {

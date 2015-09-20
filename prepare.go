@@ -7,17 +7,18 @@ import (
     "log"
     "sync"
     "flag"
-    "time"
     "bufio"
     "bytes"
     "runtime"
     "strings"
     "crypto/md5"
     "encoding/gob"
+    "encoding/json"
     "io/ioutil"
     "path/filepath"
     "archive/zip"
     "github.com/xia0pin9/axmlParser"
+    "github.com/syndtr/goleveldb/leveldb"
 )
 
 type AppPath struct {
@@ -31,13 +32,14 @@ type MetaInfo struct {
 }
 
 type Result struct {
-    md5     string
-    minfo   *MetaInfo
+    md5       []byte
+    minfo     *[]byte
+    //minfo   *MetaInfo
 }
 
 var (
     Trace, Info, Warning, Error             *log.Logger
-    md5apk, objname, dexdir, logfile         string
+    md5apk, dbname, dexdir, logfile         string
     metamap = make(map[string]*MetaInfo)
 )
 
@@ -53,13 +55,14 @@ func Init(errorHandle io.Writer) {
 
 func Usage() {
     fmt.Println("Meta info collection, get meta information of apks")
-    fmt.Println("   Usage: prepare -md5apk=md5apklist -objname=benmeta")
+    fmt.Println("   Usage: prepare -md5apk=md5apklist -dbname=benmeta")
 }
 
 func init() {
     runtime.GOMAXPROCS(runtime.NumCPU())
     flag.StringVar(&md5apk, "md5apk", "", "file name of md5 apk mapping list")
-    flag.StringVar(&objname, "objname", "", "object name where meta info are stored")
+    //flag.StringVar(&objname, "objname", "", "object name where meta info are stored")
+    flag.StringVar(&dbname, "dbname", "db", "fingerprint db storage name")
     flag.StringVar(&dexdir, "dexdir", "", "dir name to store dex files")
     flag.StringVar(&logfile, "logfile", "prepare.log", "file name for logging")
 }
@@ -232,7 +235,8 @@ func Worker(dexdir string, apkChan <-chan AppPath, resChan chan<- *Result, wg *s
     for apppath := range apkChan {
         certmd5, pkgname, dexsize, dirs, files = unzipApk(apppath.md5, dexdir, apppath.path)
         if certmd5 != "" && len(dirs) != 0 && len(files) != 0 {
-            resChan <- &Result{apppath.md5, &MetaInfo{certmd5, pkgname, dexsize, dirs, files}}
+            minfo, _ := json.Marshal(&MetaInfo{certmd5, pkgname, dexsize, dirs, files})
+            resChan <- &Result{[]byte("m-"+apppath.md5), &minfo}
         }
     }
 }
@@ -240,7 +244,7 @@ func Worker(dexdir string, apkChan <-chan AppPath, resChan chan<- *Result, wg *s
 func main() {
     //Initialization
     flag.Parse()
-    if md5apk == "" || objname == "" {
+    if md5apk == "" || dbname == "" {
         Usage()
         os.Exit(1)
     }
@@ -253,10 +257,10 @@ func main() {
     Init(logHandle)
     Info.Println("Meta info collection start")
 
-    if _, err := os.Stat(objname); err == nil { 
-        load(objname, &metamap)
-    }
-    defer store(objname, metamap)
+    //if _, err := os.Stat(objname); err == nil { 
+    //    load(objname, &metamap)
+    //}
+    //defer store(objname, metamap)
 
     //fmt.Println("size:", len(metamap))
     //for md5, _ := range metamap {
@@ -270,10 +274,12 @@ func main() {
         wg.Add(1)
         go Worker(dexdir, apkChan, resChan, wg)
     }
-
+    db, _ := leveldb.OpenFile(dbname, nil)
+    defer db.Close()
     go func() {
         for result := range resChan {
-            metamap[result.md5] = result.minfo
+            //metamap[result.md5] = result.minfo
+            db.Put(result.md5, *result.minfo, nil) 
         }
     }()
 
@@ -287,14 +293,6 @@ func main() {
             apkChan <- AppPath{lineSplit[0], lineSplit[1]}
         }
     }
-
-    t := time.NewTicker(20*time.Minute)
-    go func() {
-        for {
-            <-t.C
-            store(objname, metamap) 
-        }
-    }()
 
     close(apkChan)
     wg.Wait()

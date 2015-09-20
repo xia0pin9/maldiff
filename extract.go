@@ -90,13 +90,20 @@ func GetDiff(md5, indir, oridir, diffdir string, indexMap map[uint][]int) {
         Error.Println("Error starting Cmd", md5, err)
     }
 
-    fdiff, err := os.Create(path.Join(outdir, md5))
+    fdiff, err := os.Create(path.Join(diffdir, md5))
     if err != nil {
-        Error.Println("Error open output file", md5, err)
+        Error.Println("Error open diff file", md5, err)
     }
+    fout, err := os.Create(path.Join(oridir, md5))
+    if err != nil {
+        Error.Println("Error open ori file", md5, err)
+    }
+
     wdiff := bufio.NewWriter(fdiff)
-    GetCode(out, wdiff, indexMap)
+    wori := bufio.NewWriter(fout)
+    GetCode(out, wdiff, wori, indexMap)
     wdiff.Flush()
+    wori.Flush()
 
     go func() {
         done <- cmd.Wait()
@@ -115,7 +122,7 @@ func GetDiff(md5, indir, oridir, diffdir string, indexMap map[uint][]int) {
     }
 }
 
-func GetCode(output io.ReadCloser, w *bufio.Writer, indexMap map[uint][]int) {
+func GetCode(output io.ReadCloser, wdiff, wori *bufio.Writer, indexMap map[uint][]int) {
     var curCodes []string
     var curFname string
     var matched bool
@@ -123,6 +130,7 @@ func GetCode(output io.ReadCloser, w *bufio.Writer, indexMap map[uint][]int) {
     scanner := bufio.NewScanner(output)
     for scanner.Scan() {
         line := scanner.Text()
+        wori.WriteString(line + "\n")
         if strings.HasPrefix(line, "Method(") {
             matched = true
             curCodes = nil
@@ -134,11 +142,11 @@ func GetCode(output io.ReadCloser, w *bufio.Writer, indexMap map[uint][]int) {
         } else if matched {
             fOffset, _ := strconv.Atoi(regexp.MustCompile(`\d+`).FindString(curFname))
             if cindexes, ok := indexMap[uint(fOffset)]; ok {
-                w.WriteString(curFname + "\n")
+                wdiff.WriteString(curFname + "\n")
                 for _, cindex := range cindexes {
-                    w.WriteString(strconv.Itoa(cindex) + ": " + curCodes[cindex] + "\n")
+                    wdiff.WriteString(strconv.Itoa(cindex) + ": " + curCodes[cindex] + "\n")
                 }
-                w.WriteString("\n")
+                wdiff.WriteString("\n")
             }
             matched = false
             curCodes = nil
@@ -244,7 +252,7 @@ func main() {
     //Adding routines to workgroup and running then
     for i := 0; i < runtime.NumCPU()-2; i++ {
         wg.Add(1)
-        go Worker(dexdir, diffdir, malDB, inChan, wg)
+        go Worker(dexdir, diffdir, oridir, malDB, inChan, wg)
     }
 
     file, err := os.Open(inputlist)
